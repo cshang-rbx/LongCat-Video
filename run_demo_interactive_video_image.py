@@ -3,12 +3,14 @@ import argparse
 import datetime
 import PIL.Image
 import numpy as np
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
 from transformers import AutoTokenizer, UMT5EncoderModel
 from torchvision.io import write_video
+from diffusers.utils import load_image
 
 from longcat_video.pipeline_longcat_video import LongCatVideoPipeline
 from longcat_video.modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
@@ -23,21 +25,39 @@ def torch_gc():
     torch.cuda.ipc_collect()
 
 def generate(args):
-    # case setup
-    prompt = args.prompt
-    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
-    num_segments = args.num_segments
-    num_frames = 93
-    num_cond_frames = 13
-
     # load parsed args
+    image_path = args.image_path
     checkpoint_dir = args.checkpoint_dir
     context_parallel_size = args.context_parallel_size
     enable_compile = args.enable_compile
     output_dir = args.output_dir
+    num_frames = args.num_frames
+    num_cond_frames = args.num_cond_frames
+    num_segments = args.num_segments
+
+    image = load_image(image_path)
+    image_stem = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + Path(image_path).stem
     
-    # create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
+    # load prompt list from file
+    if args.prompt_list:
+        with open(args.prompt_list, 'r') as f:
+            prompt_list = [line.strip() for line in f.readlines() if line.strip()]
+    else:
+        # default prompts
+        prompt_list = [
+            "The kitchen is bright and airy, featuring white cabinets and a wooden countertop. A loaf of freshly baked bread rests on a cutting board, and a glass and a carton of milk are positioned nearby. A woman wearing a floral apron stands at the wooden countertop, skillfully slicing a golden-brown loaf of bread with a sharp knife. The bread is resting on a cutting board, and crumbs scatter around as she cuts.",
+            "The woman puts down the knife in her hand, reaches for the carton of milk and then pours it into the glass on the table.",
+            "The woman puts down the milk carton.",
+            "The woman picks up the glass of milk and takes a sip."
+        ]
+    num_segments = len(prompt_list) - 1
+    
+    # case setup
+    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+    
+    # prepare output paths
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     # prepare distributed environment
     rank = int(os.environ['RANK'])
@@ -77,22 +97,23 @@ def generate(args):
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed)
 
-    ### t2v (480p)
-    output = pipe.generate_t2v(
-        prompt=prompt,
+    ### i2v (480p)
+    output = pipe.generate_i2v(
+        image=image,
+        prompt=prompt_list[0],
         negative_prompt=negative_prompt,
-        height=480,
-        width=832,
+        resolution='480p', # 480p / 720p
         num_frames=num_frames,
         num_inference_steps=50,
         guidance_scale=4.0,
-        generator=generator,
+        generator=generator
     )[0]
 
     if local_rank == 0:
         output_tensor = torch.from_numpy(np.array(output))
         output_tensor = (output_tensor * 255).clamp(0, 255).to(torch.uint8)
-        write_video(os.path.join(output_dir, f"output_long_video_0.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        output_file = str(output_path / f"{image_stem}_interactive_0.mp4")
+        write_video(output_file, output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
 
     video = [(output[i] * 255).astype(np.uint8) for i in range(output.shape[0])]
     video = [PIL.Image.fromarray(img) for img in video]
@@ -110,7 +131,7 @@ def generate(args):
         
         output = pipe.generate_vc(
             video=current_video,
-            prompt=prompt,
+            prompt=prompt_list[segment_idx + 1],
             negative_prompt=negative_prompt,
             resolution='480p', # 480p / 720p
             num_frames=num_frames,
@@ -134,7 +155,8 @@ def generate(args):
 
         if local_rank == 0:
             output_tensor = torch.from_numpy(np.array(all_generated_frames))
-            write_video(os.path.join(output_dir, f"output_long_video_{segment_idx+1}.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+            output_file = str(output_path / f"{image_stem}_interactive_{segment_idx+1}.mp4")
+            write_video(output_file, output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
             del output_tensor
 
     ### long video refinement (720p)
@@ -176,7 +198,8 @@ def generate(args):
         
         if local_rank == 0:
             output_tensor = torch.from_numpy(np.array(all_refine_frames))
-            write_video(os.path.join(output_dir, f"output_longvideo_refine_{segment_idx}.mp4"), output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
+            output_file = str(output_path / f"{image_stem}_interactive_refine_{segment_idx}.mp4")
+            write_video(output_file, output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
 
 def _parse_args():
     parser = argparse.ArgumentParser()
@@ -195,24 +218,41 @@ def _parse_args():
         action='store_true',
     )
     parser.add_argument(
-        "--prompt",
-        type=str,
-        default="realistic filming style, a person wearing a dark helmet, a deep-colored jacket, blue jeans, and bright yellow shoes rides a skateboard along a winding mountain road. The skateboarder starts in a standing position, then gradually lowers into a crouch, extending one hand to touch the road surface while maintaining a low center of gravity to navigate a sharp curve. After completing the turn, the skateboarder rises back to a standing position and continues gliding forward. The background features lush green hills flanking both sides of the road, with distant snow-capped mountain peaks rising against a clear, bright blue sky. The camera follows closely from behind, smoothly tracking the skateboarder's movements and capturing the dynamic scenery along the route. The scene is shot in natural daylight, highlighting the vivid outdoor environment and the skateboarder's fluid actions.",
-        help="Text prompt for video generation",
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
         default="./output",
-        help="Directory to save output videos",
+        help="Directory to save output MP4 files",
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=93,
+        help="Number of frames to generate per segment",
+    )
+    parser.add_argument(
+        "--num_cond_frames",
+        type=int,
+        default=13,
+        help="Number of conditioning frames for video continuation",
     )
     parser.add_argument(
         "--num_segments",
         type=int,
-        default=11,
-        help="Number of segments for long video generation (default: 11 for 1 minute video)",
+        default=None,
+        help="Number of segments to generate (total prompts = num_segments + 1)",
     )
-
+    parser.add_argument(
+        "--prompt_list",
+        type=str,
+        default=None,
+        help="Path to a text file containing prompts (one per line). If not provided, uses default prompts.",
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default="assets/girl.png",
+        help="Path to input image",
+    )
     args = parser.parse_args()
 
     return args

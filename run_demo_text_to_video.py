@@ -3,6 +3,7 @@ import argparse
 import datetime
 import PIL.Image
 import numpy as np
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -24,14 +25,27 @@ def torch_gc():
 
 
 def generate(args):
-    # case setup
-    prompt = "In a realistic photography style, a white boy around seven or eight years old sits on a park bench, wearing a light blue T-shirt, denim shorts, and white sneakers. He holds an ice cream cone with vanilla and chocolate flavors, and beside him is a medium-sized golden Labrador. Smiling, the boy offers the ice cream to the dog, who eagerly licks it with its tongue. The sun is shining brightly, and the background features a green lawn and several tall trees, creating a warm and loving scene."
-    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
-
     # load parsed args
+    prompt = args.prompt
     checkpoint_dir = args.checkpoint_dir
     context_parallel_size = args.context_parallel_size
     enable_compile = args.enable_compile
+    output_dir = args.output_dir
+    num_frames = args.num_frames
+    height = args.height
+    width = args.width
+    
+    # case setup
+    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+    
+    # prepare output paths
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    output_t2v_path = str(output_path / f"{timestamp}_t2v.mp4")
+    output_t2v_distill_path = str(output_path / f"{timestamp}_t2v_distill.mp4")
+    output_t2v_refine_path = str(output_path / f"{timestamp}_t2v_refine.mp4")
 
     # prepare distributed environment
     rank = int(os.environ['RANK'])
@@ -75,9 +89,9 @@ def generate(args):
     output = pipe.generate_t2v(
         prompt=prompt,
         negative_prompt=negative_prompt,
-        height=480,
-        width=832,
-        num_frames=93,
+        height=height,
+        width=width,
+        num_frames=num_frames,
         num_inference_steps=50,
         guidance_scale=4.0,
         generator=generator,
@@ -86,7 +100,7 @@ def generate(args):
     if local_rank == 0:
         output_tensor = torch.from_numpy(np.array(output))
         output_tensor = (output_tensor * 255).clamp(0, 255).to(torch.uint8)
-        write_video("output_t2v.mp4", output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        write_video(output_t2v_path, output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
     del output
     torch_gc()
 
@@ -100,9 +114,9 @@ def generate(args):
 
     output_distill = pipe.generate_t2v(
         prompt=prompt,
-        height=480,
-        width=832,
-        num_frames=93,
+        height=height,
+        width=width,
+        num_frames=num_frames,
         num_inference_steps=16,
         use_distill=True,
         guidance_scale=1.0,
@@ -113,7 +127,7 @@ def generate(args):
     if local_rank == 0:
         output_processed_tensor = torch.from_numpy(np.array(output_distill))
         output_processed_tensor = (output_processed_tensor * 255).clamp(0, 255).to(torch.uint8)
-        write_video("output_t2v_distill.mp4", output_processed_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        write_video(output_t2v_distill_path, output_processed_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
 
     ### t2v refinement (720p)
     refinement_lora_path = os.path.join(checkpoint_dir, 'lora/refinement_lora.safetensors')
@@ -142,7 +156,7 @@ def generate(args):
     if local_rank == 0:
         output_tensor = torch.from_numpy(output_refine)
         output_tensor = (output_tensor * 255).clamp(0, 255).to(torch.uint8)
-        write_video("output_t2v_refine.mp4", output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
+        write_video(output_t2v_refine_path, output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
 
 
 def _parse_args():
@@ -160,6 +174,36 @@ def _parse_args():
     parser.add_argument(
         '--enable_compile',
         action='store_true',
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./output",
+        help="Directory to save output MP4 files",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="In a realistic photography style, a white boy around seven or eight years old sits on a park bench, wearing a light blue T-shirt, denim shorts, and white sneakers. He holds an ice cream cone with vanilla and chocolate flavors, and beside him is a medium-sized golden Labrador. Smiling, the boy offers the ice cream to the dog, who eagerly licks it with its tongue. The sun is shining brightly, and the background features a green lawn and several tall trees, creating a warm and loving scene.",
+        help="Text prompt for video generation",
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=93,
+        help="Number of frames to generate",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=480,
+        help="Height of the generated video",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=832,
+        help="Width of the generated video",
     )
 
     args = parser.parse_args()

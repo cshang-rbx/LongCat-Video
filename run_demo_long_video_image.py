@@ -3,12 +3,14 @@ import argparse
 import datetime
 import PIL.Image
 import numpy as np
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
 from transformers import AutoTokenizer, UMT5EncoderModel
 from torchvision.io import write_video
+from diffusers.utils import load_image
 
 from longcat_video.pipeline_longcat_video import LongCatVideoPipeline
 from longcat_video.modules.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
@@ -24,11 +26,15 @@ def torch_gc():
 
 def generate(args):
     # case setup
+    image_path = args.image_path
     prompt = args.prompt
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     num_segments = args.num_segments
     num_frames = 93
     num_cond_frames = 13
+
+    image = load_image(image_path)
+    image_stem = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + Path(image_path).stem
 
     # load parsed args
     checkpoint_dir = args.checkpoint_dir
@@ -77,22 +83,22 @@ def generate(args):
     generator = torch.Generator(device=local_rank)
     generator.manual_seed(seed)
 
-    ### t2v (480p)
-    output = pipe.generate_t2v(
+    ### i2v (480p)
+    output = pipe.generate_i2v(
+        image=image,
         prompt=prompt,
         negative_prompt=negative_prompt,
-        height=480,
-        width=832,
+        resolution='480p', # 480p / 720p
         num_frames=num_frames,
         num_inference_steps=50,
         guidance_scale=4.0,
-        generator=generator,
+        generator=generator
     )[0]
 
     if local_rank == 0:
         output_tensor = torch.from_numpy(np.array(output))
         output_tensor = (output_tensor * 255).clamp(0, 255).to(torch.uint8)
-        write_video(os.path.join(output_dir, f"output_long_video_0.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        write_video(os.path.join(output_dir, f"{image_stem}_long_video_0.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
 
     video = [(output[i] * 255).astype(np.uint8) for i in range(output.shape[0])]
     video = [PIL.Image.fromarray(img) for img in video]
@@ -134,7 +140,7 @@ def generate(args):
 
         if local_rank == 0:
             output_tensor = torch.from_numpy(np.array(all_generated_frames))
-            write_video(os.path.join(output_dir, f"output_long_video_{segment_idx+1}.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+            write_video(os.path.join(output_dir, f"{image_stem}_long_video_{segment_idx+1}.mp4"), output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
             del output_tensor
 
     ### long video refinement (720p)
@@ -176,7 +182,7 @@ def generate(args):
         
         if local_rank == 0:
             output_tensor = torch.from_numpy(np.array(all_refine_frames))
-            write_video(os.path.join(output_dir, f"output_longvideo_refine_{segment_idx}.mp4"), output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
+            write_video(os.path.join(output_dir, f"{image_stem}_longvideo_refine_{segment_idx}.mp4"), output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
 
 def _parse_args():
     parser = argparse.ArgumentParser()
@@ -193,6 +199,12 @@ def _parse_args():
     parser.add_argument(
         '--enable_compile',
         action='store_true',
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default="assets/girl.png",
+        help="Path to input image",
     )
     parser.add_argument(
         "--prompt",

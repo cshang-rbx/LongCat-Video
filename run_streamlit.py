@@ -71,7 +71,7 @@ def main():
     st.title("🎬 LongCatVideo Generator")
     st.markdown("Supports Text-to-Video (T2V), Image-to-Video (I2V), and Video Continuation (VC) generation")
     
-    checkpoint_dir = st.text_input("Model Dir", "./weights/LongCat-Video")
+    checkpoint_dir = st.text_input("Model Dir", "/home/coder/dev/LongCat-Video")
 
     # Load model
     try:

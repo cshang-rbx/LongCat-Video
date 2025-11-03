@@ -79,7 +79,7 @@ FlashAttention-2 is enabled in the model config by default; you can also change 
 Download models using huggingface-cli:
 ```shell
 pip install "huggingface_hub[cli]"
-huggingface-cli download meituan-longcat/LongCat-Video --local-dir ./weights/LongCat-Video
+huggingface-cli download meituan-longcat/LongCat-Video --local-dir LongCat-Video
 ```
 
 ### Run Text-to-Video

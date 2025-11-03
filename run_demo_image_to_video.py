@@ -3,6 +3,8 @@ import argparse
 import datetime
 import PIL.Image
 import numpy as np
+from pathlib import Path
+
 
 import torch
 import torch.distributed as dist
@@ -25,16 +27,27 @@ def torch_gc():
 
 
 def generate(args):
-    # case setup
-    image_path = "assets/girl.png"
-    image = load_image(image_path)
-    prompt = "A woman sits at a wooden table by the window in a cozy café. She reaches out with her right hand, picks up the white coffee cup from the saucer, and gently brings it to her lips to take a sip. After drinking, she places the cup back on the table and looks out the window, enjoying the peaceful atmosphere."
-    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
-
     # load parsed args
+    image_path = args.image_path
+    prompt = args.prompt
     checkpoint_dir = args.checkpoint_dir
     context_parallel_size = args.context_parallel_size
     enable_compile = args.enable_compile
+    output_dir = args.output_dir
+    num_frames = args.num_frames
+    
+    # case setup
+    image = load_image(image_path)
+    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+    
+    # prepare output paths
+    image_stem = datetime.datetime.now().strftime("%Y%m%d%H%M%S") + "_" + Path(image_path).stem
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    output_i2v_path = str(output_path / f"{image_stem}_i2v.mp4")
+    output_i2v_distill_path = str(output_path / f"{image_stem}_i2v_distill.mp4")
+    output_i2v_refine_path = str(output_path / f"{image_stem}_i2v_refine.mp4")
 
     # prepare distributed environment
     rank = int(os.environ['RANK'])
@@ -82,7 +95,7 @@ def generate(args):
         prompt=prompt,
         negative_prompt=negative_prompt,
         resolution='480p', # 480p / 720p
-        num_frames=93,
+        num_frames=num_frames,
         num_inference_steps=50,
         guidance_scale=4.0,
         generator=generator
@@ -94,7 +107,7 @@ def generate(args):
         output = [frame.resize(target_size, PIL.Image.BICUBIC) for frame in output]
 
         output_tensor = torch.from_numpy(np.array(output))
-        write_video("output_i2v.mp4", output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        write_video(output_i2v_path, output_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
     del output
     torch_gc()
 
@@ -110,7 +123,7 @@ def generate(args):
         image=image,
         prompt=prompt,
         resolution='480p', # 480p / 720p
-        num_frames=93,
+        num_frames=num_frames,
         num_inference_steps=16,
         use_distill=True,
         guidance_scale=1.0,
@@ -124,7 +137,7 @@ def generate(args):
         output_processed = [frame.resize(target_size, PIL.Image.BICUBIC) for frame in output_processed]
 
         output_processed_tensor = torch.from_numpy(np.array(output_processed))
-        write_video("output_i2v_distill.mp4", output_processed_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
+        write_video(output_i2v_distill_path, output_processed_tensor, fps=15, video_codec="libx264", options={"crf": f"{18}"})
 
     ### i2v refinement (720p)
     refinement_lora_path = os.path.join(checkpoint_dir, 'lora/refinement_lora.safetensors')
@@ -158,7 +171,7 @@ def generate(args):
         output_refine = [frame.resize(target_size, PIL.Image.BICUBIC) for frame in output_refine]
 
         output_tensor = torch.from_numpy(np.array(output_refine))
-        write_video("output_i2v_refine.mp4", output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
+        write_video(output_i2v_refine_path, output_tensor, fps=30, video_codec="libx264", options={"crf": f"{10}"})
 
 
 def _parse_args():
@@ -176,6 +189,30 @@ def _parse_args():
     parser.add_argument(
         '--enable_compile',
         action='store_true',
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./output",
+        help="Directory to save output MP4 files",
+    )
+    parser.add_argument(
+        "--image_path",
+        type=str,
+        default="assets/girl.png",
+        help="Path to input image",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default="A woman sits at a wooden table by the window in a cozy café. She reaches out with her right hand, picks up the white coffee cup from the saucer, and gently brings it to her lips to take a sip. After drinking, she places the cup back on the table and looks out the window, enjoying the peaceful atmosphere.",
+        help="Text prompt for video generation",
+    )
+    parser.add_argument(
+        "--num_frames",
+        type=int,
+        default=93,
+        help="Number of frames to generate",
     )
 
     args = parser.parse_args()
